@@ -27,19 +27,20 @@ struct thread_data {
     long *sum;
 };
 
-pthread_mutex_t consumer_start_mutex;
-pthread_cond_t consumer_start_condition;
+pthread_mutex_t consumer_start_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t consumer_start_condition = PTHREAD_COND_INITIALIZER;
 bool is_consumer_started = false;
 
-pthread_mutex_t value_mutex;
-pthread_cond_t value_write_cond;
-pthread_cond_t value_read_cond;
+pthread_mutex_t value_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t value_write_cond = PTHREAD_COND_INITIALIZER;
+pthread_cond_t value_read_cond = PTHREAD_COND_INITIALIZER;
 bool is_data_ready = false;
 
 bool is_data_over = false;
 
 void *producer_routine(void *arg) {
     Value *value = (Value *) arg;
+
     // Wait for consumer to start
     pthread_mutex_lock(&consumer_start_mutex);
     while (!is_consumer_started) {
@@ -82,6 +83,7 @@ void *producer_routine(void *arg) {
 }
 
 void *consumer_routine(void *arg) {
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
     thread_data *data = (thread_data *) arg;
 
     // notify about start
@@ -104,7 +106,7 @@ void *consumer_routine(void *arg) {
 
         if (is_data_over) {
             pthread_mutex_unlock(&value_mutex);
-            return data->sum;
+            pthread_exit(data->sum);
         }
 
         *(data->sum) += data->value->get();
@@ -120,6 +122,8 @@ void *consumer_routine(void *arg) {
 }
 
 void *consumer_interruptor_routine(void *arg) {
+    std::vector<pthread_t> *consumers = (std::vector<pthread_t> *) arg;
+
     // wait for consumer to start
     pthread_mutex_lock(&consumer_start_mutex);
     while (!is_consumer_started) {
@@ -128,41 +132,49 @@ void *consumer_interruptor_routine(void *arg) {
     pthread_mutex_unlock(&consumer_start_mutex);
 
     // interrupt consumer while producer is running
+    while (!is_data_over) {
+        pthread_cancel(consumers->at(rand() % consumers->size()));
+    }
+
+    pthread_exit(NULL);
 }
 
 int run_threads(int N, int max_consumer_sleep_time) {
-    // start N threads and wait until they're done
-
-    srand((unsigned int) time(NULL));
+    srand((unsigned) time(NULL));
 
     Value *value = new Value();
     long *sum = new long(0);
 
-    pthread_t consumer_interruptor;
-    pthread_create(&consumer_interruptor, NULL, consumer_interruptor_routine, NULL);
-
+    // start N threads and wait until they're done
     pthread_t producer;
     pthread_create(&producer, NULL, producer_routine, value);
 
-    pthread_t consumers[N];
+    std::vector<pthread_t> consumers;
     for (unsigned i = 0; i < N; i++) {
         thread_data *data = new thread_data();
         data->value = value;
-        data->max_consumer_sleep_time = (unsigned int) max_consumer_sleep_time;
+        data->max_consumer_sleep_time = (unsigned) max_consumer_sleep_time;
         data->sum = sum;
         data->thread_id = i;
-        pthread_create(&consumers[i], NULL, consumer_routine, (void *) data);
+
+        pthread_t consumer;
+        pthread_create(&consumer, NULL, consumer_routine, (void *) data);
+        consumers.push_back(consumer);
     }
+
+    pthread_t consumer_interruptor;
+    pthread_create(&consumer_interruptor, NULL, consumer_interruptor_routine, &consumers);
 
     void *result = NULL;
 
     pthread_join(producer, NULL);
     pthread_join(consumer_interruptor, NULL);
-    for (int i = 0; i < N; i++) {
-        pthread_join(consumers[i], &result);
+    pthread_join(consumers[0], &result);
+    for (int i = 1; i < N; i++) {
+        pthread_join(consumers[i], NULL);
     }
-    // return aggregated sum of values
 
+    // return aggregated sum of values
     return *(int *) result;
 }
 
@@ -175,12 +187,9 @@ int main(int argc, char *argv[]) {
     int num_of_consumers = atoi(argv[1]);
     int max_consumer_sleep_time = atoi(argv[2]);
 
-    pthread_mutex_init(&consumer_start_mutex, NULL);
-    pthread_cond_init(&consumer_start_condition, NULL);
-
-    pthread_mutex_init(&value_mutex, NULL);
-    pthread_cond_init(&value_write_cond, NULL);
-    pthread_cond_init(&value_read_cond, NULL);
+    if (num_of_consumers < 1 || max_consumer_sleep_time < 0) {
+        std::cout << "Incorrect arguments" << std::endl;
+    }
 
     std::cout << run_threads(num_of_consumers, max_consumer_sleep_time) << std::endl;
     return 0;
